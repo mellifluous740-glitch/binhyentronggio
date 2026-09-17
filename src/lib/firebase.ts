@@ -17,6 +17,7 @@ import {
   deleteDoc as rawDeleteDoc,
   getDocs as rawGetDocs,
   writeBatch as rawWriteBatch,
+  getDocFromServer,
   serverTimestamp,
   arrayUnion,
   arrayRemove,
@@ -134,7 +135,7 @@ export const isFirestoreQuotaExhausted = (): boolean => {
 export const markFirestoreQuotaExhausted = () => {
   localQuotaExhausted = true;
   try {
-    localStorage.setItem('mel_firestore_quota_exhausted_until', String(Date.now() + 2 * 60 * 60 * 1000));
+    localStorage.setItem('mel_firestore_quota_exhausted_until', String(Date.now() + 12 * 60 * 60 * 1000));
   } catch {}
 };
 
@@ -142,22 +143,28 @@ export const checkAndHandleQuotaError = (err: any): boolean => {
   if (!err) return false;
   const code = String(err.code || '');
   const msg = String(err.message || '');
+  const str = String(err || '');
   if (
     code === 'resource-exhausted' ||
     msg.includes('resource-exhausted') ||
     msg.includes('Quota limit exceeded') ||
     msg.includes('Free daily write units') ||
     msg.includes('Free daily read units') ||
+    msg.includes('daily write units') ||
+    msg.includes('daily read units') ||
     msg.includes('Quota exceeded') ||
-    msg.includes('quota')
+    msg.includes('quota metric') ||
+    msg.includes('quota') ||
+    str.includes('resource-exhausted') ||
+    str.includes('Quota limit exceeded')
   ) {
     localQuotaExhausted = true;
     try {
-      localStorage.setItem('mel_firestore_quota_exhausted_until', String(Date.now() + 2 * 60 * 60 * 1000));
+      localStorage.setItem('mel_firestore_quota_exhausted_until', String(Date.now() + 12 * 60 * 60 * 1000));
     } catch {}
     if (!quotaNoticeLogged) {
       quotaNoticeLogged = true;
-      console.info('[Firestore] Giới hạn đọc/ghi miễn phí trong ngày của Firestore đã đạt mức tối đa. Blog tự động vận hành mượt mà ở chế độ offline-first qua LocalStorage & GitHub.');
+      console.info('[Firestore] Giới hạn đọc/ghi miễn phí trong ngày của Firestore (Spark 20.000 writes/ngày) đã đạt mức tối đa. Blog tự động vận hành mượt mà ở chế độ offline-first qua LocalStorage & Server API.');
     }
     return true;
   }
@@ -214,12 +221,15 @@ export const getDocs = async (q: any): Promise<any> => {
   }
 };
 
-// Resilient setDoc wrapper: always attempts Firestore write, gracefully catches quota errors
+// Resilient setDoc wrapper: skips Firestore call if quota exhausted, gracefully catches quota errors
 export const setDoc = async (
   docRef: DocumentReference<DocumentData>,
   data: DocumentData,
   options?: SetOptions
 ): Promise<void> => {
+  if (isFirestoreQuotaExhausted()) {
+    return Promise.resolve();
+  }
   try {
     if (options) {
       await rawSetDoc(docRef, data, options);
@@ -234,12 +244,15 @@ export const setDoc = async (
   }
 };
 
-// Resilient updateDoc wrapper: always attempts Firestore write, gracefully catches quota errors
+// Resilient updateDoc wrapper: skips Firestore call if quota exhausted, gracefully catches quota errors
 export const updateDoc = async (
   docRef: DocumentReference<DocumentData>,
   dataOrField: UpdateData<DocumentData> | string,
   ...moreFieldsAndValues: any[]
 ): Promise<void> => {
+  if (isFirestoreQuotaExhausted()) {
+    return Promise.resolve();
+  }
   try {
     await (rawUpdateDoc as any)(docRef, dataOrField, ...moreFieldsAndValues);
   } catch (err: any) {
@@ -250,8 +263,11 @@ export const updateDoc = async (
   }
 };
 
-// Resilient deleteDoc wrapper: always attempts Firestore write, gracefully catches quota errors
+// Resilient deleteDoc wrapper: skips Firestore call if quota exhausted, gracefully catches quota errors
 export const deleteDoc = async (docRef: DocumentReference<DocumentData>): Promise<void> => {
+  if (isFirestoreQuotaExhausted()) {
+    return Promise.resolve();
+  }
   try {
     await rawDeleteDoc(docRef);
   } catch (err: any) {
@@ -262,11 +278,14 @@ export const deleteDoc = async (docRef: DocumentReference<DocumentData>): Promis
   }
 };
 
-// Resilient addDoc wrapper: always attempts Firestore write, gracefully catches quota errors
+// Resilient addDoc wrapper: skips Firestore call if quota exhausted, gracefully catches quota errors
 export const addDoc = async (
   collectionRef: CollectionReference<DocumentData>,
   data: DocumentData
 ): Promise<any> => {
+  if (isFirestoreQuotaExhausted()) {
+    return Promise.resolve({ id: 'local_' + Date.now() });
+  }
   try {
     return await rawAddDoc(collectionRef, data);
   } catch (err: any) {
@@ -282,19 +301,28 @@ export const writeBatch = (firestore: Firestore) => {
   const batch = rawWriteBatch(firestore);
   return {
     set: (docRef: DocumentReference<DocumentData>, data: DocumentData, options?: SetOptions) => {
-      if (options) batch.set(docRef, data, options);
-      else batch.set(docRef, data);
+      if (!isFirestoreQuotaExhausted()) {
+        if (options) batch.set(docRef, data, options);
+        else batch.set(docRef, data);
+      }
       return batch;
     },
     update: (docRef: DocumentReference<DocumentData>, dataOrField: any, ...more: any[]) => {
-      (batch.update as any)(docRef, dataOrField, ...more);
+      if (!isFirestoreQuotaExhausted()) {
+        (batch.update as any)(docRef, dataOrField, ...more);
+      }
       return batch;
     },
     delete: (docRef: DocumentReference<DocumentData>) => {
-      batch.delete(docRef);
+      if (!isFirestoreQuotaExhausted()) {
+        batch.delete(docRef);
+      }
       return batch;
     },
     commit: async (): Promise<void> => {
+      if (isFirestoreQuotaExhausted()) {
+        return Promise.resolve();
+      }
       try {
         await batch.commit();
       } catch (err: any) {
@@ -313,6 +341,9 @@ export const onSnapshot = (
   observerOrNext: any,
   onError?: (error: any) => void
 ) => {
+  if (isFirestoreQuotaExhausted()) {
+    return () => {};
+  }
   const safeOnError = (err: any) => {
     checkAndHandleQuotaError(err);
     if (onError) {
@@ -335,6 +366,27 @@ export const onSnapshot = (
   }
   return rawOnSnapshot(reference, observerOrNext, safeOnError);
 };
+
+/**
+ * Validate Connection to Firestore on boot (per Firebase skill guideline).
+ */
+export async function testConnection() {
+  if (typeof window === 'undefined' || !isFirestoreEnabled()) return;
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error: any) {
+    checkAndHandleQuotaError(error);
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.warn('Please check your Firebase configuration or network status.');
+    }
+  }
+}
+
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    testConnection().catch(() => {});
+  }, 1000);
+}
 
 export {
   doc,

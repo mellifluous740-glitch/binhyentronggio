@@ -18,6 +18,7 @@ import {
   arrayUnion,
   arrayRemove,
   isFirestoreQuotaExhausted,
+  checkAndHandleQuotaError,
 } from './firebase';
 import { GlobalRealtimeStats, StoryRealtimeStats, RealtimeComment, Story, Chapter, Announcement, ReaderLetter, CommentReply, CollaboratorItem, UserProfile } from '../types';
 export type { ReaderLetter, RealtimeComment, CommentReply, GlobalRealtimeStats, StoryRealtimeStats, CollaboratorItem, UserProfile };
@@ -135,21 +136,49 @@ export const flagFirestoreQuotaExceeded = (err?: any): boolean => {
 };
 
 /**
- * Parses timestamps safely, properly handling Vietnamese friendly strings like "Vừa đăng" / "Vừa cập nhật"
+ * Parses timestamps safely, properly handling Vietnamese friendly strings like "Vừa đăng" / "Vừa cập nhật" / "Vừa xong"
  */
 export const parseSafeTimestamp = (dateStr?: string): number => {
   if (!dateStr) return 0;
-  if (dateStr === 'Vừa đăng' || dateStr === 'Vừa cập nhật' || dateStr.includes('Vừa')) {
+  if (dateStr === 'Vừa đăng' || dateStr === 'Vừa cập nhật' || dateStr.includes('Vừa') || dateStr === 'Vừa xong') {
     return Date.now();
   }
   const parsed = new Date(dateStr).getTime();
   if (!isNaN(parsed) && parsed > 0) return parsed;
   if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr)) {
     const [d, m, y] = dateStr.split('/');
-    const dTime = new Date(`${y}-${m}-${d}`).getTime();
+    const dTime = new Date(Number(y), Number(m) - 1, Number(d)).getTime();
     if (!isNaN(dTime)) return dTime;
   }
   return 0;
+};
+
+/**
+ * Universally sorts stories by latest updatedAt (newest first).
+ */
+export const sortStoriesByLatest = (list: Story[]): Story[] => {
+  return [...list].sort((a, b) => {
+    const timeA = parseSafeTimestamp(a.updatedAt);
+    const timeB = parseSafeTimestamp(b.updatedAt);
+    if (timeA !== timeB) {
+      return timeB - timeA;
+    }
+    return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+  });
+};
+
+/**
+ * Universally sorts announcements: pinned always first, then newest date/createdAt first.
+ */
+export const sortAnnouncements = (list: Announcement[]): Announcement[] => {
+  return [...list].sort((a, b) => {
+    if (a.isPinned && !b.isPinned) return -1;
+    if (!a.isPinned && b.isPinned) return 1;
+    const timeA = parseSafeTimestamp((a as any).createdAt || a.date);
+    const timeB = parseSafeTimestamp((b as any).createdAt || b.date);
+    if (timeA !== timeB) return timeB - timeA;
+    return (b.id || '').localeCompare(a.id || '');
+  });
 };
 
 /**
@@ -477,7 +506,7 @@ export const initServerRealtimeSync = () => {
         }
 
         if (updated || current.length === 0) {
-          const merged = Array.from(currentMap.values());
+          const merged = sortStoriesByLatest(Array.from(currentMap.values()));
           try {
             localStorage.setItem('mel_published_stories', JSON.stringify(merged));
           } catch {}
@@ -526,7 +555,7 @@ export const initServerRealtimeSync = () => {
           }
         }
         if (annChanged || currentAnn.length === 0) {
-          const nextAnn = Array.from(annMap.values());
+          const nextAnn = sortAnnouncements(Array.from(annMap.values()));
           try {
             localStorage.setItem('mel_announcements', JSON.stringify(nextAnn));
           } catch {}
@@ -597,14 +626,8 @@ export const initServerRealtimeSync = () => {
         const msg = JSON.parse(e.data);
         if (msg.type === 'story_saved') {
           const current = getStoredStories();
-          const idx = current.findIndex((s) => s.id === msg.payload.id);
-          let nextStories: Story[];
-          if (idx >= 0) {
-            nextStories = [...current];
-            nextStories[idx] = msg.payload;
-          } else {
-            nextStories = [msg.payload, ...current];
-          }
+          const filtered = current.filter((s) => s.id !== msg.payload.id);
+          const nextStories = sortStoriesByLatest([msg.payload, ...filtered]);
           try {
             localStorage.setItem('mel_published_stories', JSON.stringify(nextStories));
           } catch {}
@@ -642,6 +665,19 @@ export const initServerRealtimeSync = () => {
           activeAllChaptersSubscribers.forEach((cb) => {
             try { cb(getLiveChaptersRuntimeCache()); } catch {}
           });
+
+          // Also update the story updatedAt and re-sort
+          const currentStories = getStoredStories();
+          const sTarget = currentStories.find((s) => s.id === sId);
+          if (sTarget) {
+            sTarget.completedChapters = nextList.length;
+            sTarget.updatedAt = ch.updatedAt || new Date().toISOString();
+            const reSorted = sortStoriesByLatest(currentStories);
+            try {
+              localStorage.setItem('mel_published_stories', JSON.stringify(reSorted));
+            } catch {}
+            notifyStorySubscribers(reSorted);
+          }
         } else if (msg.type === 'chapter_deleted') {
           const { id, storyId } = msg.payload;
           const currentList = getStoryChapters(storyId);
@@ -657,8 +693,8 @@ export const initServerRealtimeSync = () => {
         } else if (msg.type === 'announcement_saved') {
           const ann: Announcement = msg.payload;
           const current = getStoredAnnouncements();
-          const idx = current.findIndex((a) => a.id === ann.id);
-          const next = idx >= 0 ? current.map((a) => (a.id === ann.id ? ann : a)) : [ann, ...current];
+          const filtered = current.filter((a) => a.id !== ann.id);
+          const next = sortAnnouncements([ann, ...filtered]);
           try {
             localStorage.setItem('mel_announcements', JSON.stringify(next));
           } catch {}
@@ -712,8 +748,10 @@ export const initServerRealtimeSync = () => {
           const c: RealtimeComment = msg.payload;
           if (c && c.storyId) {
             const current = getStoredComments(c.storyId);
-            const idx = current.findIndex((x) => x.id === c.id);
-            const next = idx >= 0 ? current.map((x) => (x.id === c.id ? c : x)) : [c, ...current];
+            const filtered = current.filter((x) => x.id !== c.id);
+            const next = [c, ...filtered].sort(
+              (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+            );
             saveStoredComments(c.storyId, next);
             notifyCommentSubscribers(c.storyId, next);
           }
@@ -1268,11 +1306,11 @@ export const subscribeToComments = (
   if (!isFirestoreQuotaExhausted()) {
     try {
       const commentsColl = collection(db, 'comments');
+      // Query without composite index requirement, sorting locally
       const q = query(
         commentsColl,
         where('storyId', '==', storyId),
-        orderBy('createdAt', 'desc'),
-        limit(60)
+        limit(100)
       );
       unsubFirestore = onSnapshot(
         q,
@@ -1302,7 +1340,7 @@ export const subscribeToComments = (
             }
 
             list.push({
-              id: d.id,
+              id: item.id || d.id,
               storyId: item.storyId,
               chapterId: item.chapterId,
               chapterNumber: item.chapterNumber,
@@ -1322,7 +1360,7 @@ export const subscribeToComments = (
             });
           });
 
-          // Merge with stored comments
+          // Merge with stored comments and sort newest first
           const current = getStoredComments(storyId);
           const map = new Map<string, RealtimeComment>();
           list.forEach((c) => map.set(c.id, c));
@@ -1336,6 +1374,7 @@ export const subscribeToComments = (
           notifyCommentSubscribers(storyId, merged);
         },
         (err) => {
+          checkAndHandleQuotaError(err);
           console.warn(`Comments snapshot warning for ${storyId}:`, err);
         }
       );
@@ -1409,41 +1448,52 @@ export const postRealtimeComment = async (comment: {
     });
   }
 
-  // 3. Firestore persistence if available
-  try {
-    const commentsColl = collection(db, 'comments');
-    await addDoc(commentsColl, sanitizeForFirestore({
-      ...cleanComment,
-      userEmail: cleanComment.userEmail || null,
-      userId: cleanComment.userId || null,
-      roleBadge: cleanComment.roleBadge || null,
-      rating: cleanComment.rating || null,
-    })).catch(() => {});
+  // 3. Firestore persistence if available with exact ID
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const commentRef = doc(db, 'comments', cleanComment.id);
+      await setDoc(commentRef, sanitizeForFirestore({
+        ...cleanComment,
+        userEmail: cleanComment.userEmail || null,
+        userId: cleanComment.userId || null,
+        roleBadge: cleanComment.roleBadge || null,
+        rating: cleanComment.rating || null,
+      })).catch((err) => {
+        checkAndHandleQuotaError(err);
+      });
 
-    // Increment comment count on story_stats
-    const storyDocRef = doc(db, 'story_stats', comment.storyId);
-    await updateDoc(storyDocRef, {
-      commentCount: increment(1),
-    }).catch(async () => {
-      await setDoc(storyDocRef, {
-        storyId: comment.storyId,
-        views: 1,
-        likes: 0,
-        followers: 0,
-        commentCount: 1,
-        ratingSum: 0,
-        ratingCount: 0,
-        updatedAt: new Date().toISOString(),
-      }).catch(() => {});
-    });
+      // Increment comment count on story_stats
+      if (!isFirestoreQuotaExhausted()) {
+        const storyDocRef = doc(db, 'story_stats', comment.storyId);
+        await updateDoc(storyDocRef, {
+          commentCount: increment(1),
+        }).catch(async (err) => {
+          checkAndHandleQuotaError(err);
+          if (!isFirestoreQuotaExhausted()) {
+            await setDoc(storyDocRef, {
+              storyId: comment.storyId,
+              views: 1,
+              likes: 0,
+              followers: 0,
+              commentCount: 1,
+              ratingSum: 0,
+              ratingCount: 0,
+              updatedAt: new Date().toISOString(),
+            }).catch((setErr) => checkAndHandleQuotaError(setErr));
+          }
+        });
+      }
 
-    // Increment global comment count
-    const globalDocRef = doc(db, 'site_stats', STATS_DOC_ID);
-    await updateDoc(globalDocRef, {
-      totalComments: increment(1),
-    }).catch(() => {});
-  } catch (err) {
-    console.warn('Firestore comment sync warning:', err);
+      // Increment global comment count
+      if (!isFirestoreQuotaExhausted()) {
+        const globalDocRef = doc(db, 'site_stats', STATS_DOC_ID);
+        await updateDoc(globalDocRef, {
+          totalComments: increment(1),
+        }).catch((err) => checkAndHandleQuotaError(err));
+      }
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
   }
 };
 
@@ -1532,28 +1582,30 @@ export const postCommentReply = async (
   }
 
   // 3. Firestore persistence if available
-  try {
-    const commentRef = doc(db, 'comments', commentId);
-    const snap = await getDoc(commentRef);
-    if (snap.exists()) {
-      const data = snap.data();
-      const currentReplies: CommentReply[] = Array.isArray(data.replies) ? data.replies : [];
-      const seenIds = new Set<string>();
-      const cleanedReplies: CommentReply[] = [];
-      for (const r of currentReplies) {
-        if (r && r.id && !seenIds.has(r.id) && r.id !== newReplyItem.id) {
-          seenIds.add(r.id);
-          cleanedReplies.push(sanitizeForFirestore(r));
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const commentRef = doc(db, 'comments', commentId);
+      const snap = await getDoc(commentRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        const currentReplies: CommentReply[] = Array.isArray(data.replies) ? data.replies : [];
+        const seenIds = new Set<string>();
+        const cleanedReplies: CommentReply[] = [];
+        for (const r of currentReplies) {
+          if (r && r.id && !seenIds.has(r.id) && r.id !== newReplyItem.id) {
+            seenIds.add(r.id);
+            cleanedReplies.push(sanitizeForFirestore(r));
+          }
         }
+        cleanedReplies.push(sanitizeForFirestore(newReplyItem));
+        await updateDoc(commentRef, sanitizeForFirestore({
+          replies: cleanedReplies,
+          lastRepliedAt: new Date().toISOString(),
+        })).catch((err) => checkAndHandleQuotaError(err));
       }
-      cleanedReplies.push(sanitizeForFirestore(newReplyItem));
-      await updateDoc(commentRef, sanitizeForFirestore({
-        replies: cleanedReplies,
-        lastRepliedAt: new Date().toISOString(),
-      }));
+    } catch (err) {
+      checkAndHandleQuotaError(err);
     }
-  } catch (err) {
-    console.warn('Firestore reply update warning:', err);
   }
 
   return newReplyItem;
@@ -1610,25 +1662,27 @@ export const toggleCommentLike = async (
   }
 
   // 3. Firestore persistence if available
-  try {
-    const commentRef = doc(db, 'comments', commentId);
-    const snap = await getDoc(commentRef);
-    if (snap.exists()) {
-      const data = snap.data();
-      const likedBy: string[] = Array.isArray(data.likedBy) ? data.likedBy : [];
-      const hasLiked = likedBy.includes(visitorId);
-      const newLikedBy = hasLiked
-        ? likedBy.filter((id) => id !== visitorId)
-        : [...likedBy, visitorId];
-      const fl = Math.max(0, newLikedBy.length);
-      await updateDoc(commentRef, {
-        likes: fl,
-        likedBy: newLikedBy,
-      });
-      return { likes: fl, isLiked: !hasLiked };
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const commentRef = doc(db, 'comments', commentId);
+      const snap = await getDoc(commentRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        const likedBy: string[] = Array.isArray(data.likedBy) ? data.likedBy : [];
+        const hasLiked = likedBy.includes(visitorId);
+        const newLikedBy = hasLiked
+          ? likedBy.filter((id) => id !== visitorId)
+          : [...likedBy, visitorId];
+        const fl = Math.max(0, newLikedBy.length);
+        await updateDoc(commentRef, {
+          likes: fl,
+          likedBy: newLikedBy,
+        }).catch((err) => checkAndHandleQuotaError(err));
+        return { likes: fl, isLiked: !hasLiked };
+      }
+    } catch (err) {
+      checkAndHandleQuotaError(err);
     }
-  } catch (err) {
-    console.warn('Toggle comment like warning:', err);
   }
 
   return { likes: newLikes, isLiked };
@@ -1681,36 +1735,38 @@ export const toggleReplyLike = async (
   }
 
   // 2. Firestore persistence if available
-  try {
-    const commentRef = doc(db, 'comments', commentId);
-    const snap = await getDoc(commentRef);
-    if (snap.exists()) {
-      const data = snap.data();
-      const currentReplies: CommentReply[] = data.replies || [];
-      const updatedReplies: CommentReply[] = [];
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const commentRef = doc(db, 'comments', commentId);
+      const snap = await getDoc(commentRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        const currentReplies: CommentReply[] = data.replies || [];
+        const updatedReplies: CommentReply[] = [];
 
-      for (const r of currentReplies) {
-        if (!r || !r.id) continue;
-        if (r.id === replyId) {
-          const likedBy = Array.isArray(r.likedBy) ? r.likedBy : [];
-          const hasLiked = likedBy.includes(visitorId);
-          const newLikedBy = hasLiked
-            ? likedBy.filter((id) => id !== visitorId)
-            : [...likedBy, visitorId];
-          finalLikes = Math.max(0, newLikedBy.length);
-          isLikedNow = !hasLiked;
-          updatedReplies.push(sanitizeForFirestore({ ...r, likes: finalLikes, likedBy: newLikedBy }));
-        } else {
-          updatedReplies.push(sanitizeForFirestore(r));
+        for (const r of currentReplies) {
+          if (!r || !r.id) continue;
+          if (r.id === replyId) {
+            const likedBy = Array.isArray(r.likedBy) ? r.likedBy : [];
+            const hasLiked = likedBy.includes(visitorId);
+            const newLikedBy = hasLiked
+              ? likedBy.filter((id) => id !== visitorId)
+              : [...likedBy, visitorId];
+            finalLikes = Math.max(0, newLikedBy.length);
+            isLikedNow = !hasLiked;
+            updatedReplies.push(sanitizeForFirestore({ ...r, likes: finalLikes, likedBy: newLikedBy }));
+          } else {
+            updatedReplies.push(sanitizeForFirestore(r));
+          }
         }
-      }
 
-      await updateDoc(commentRef, {
-        replies: updatedReplies,
-      });
+        await updateDoc(commentRef, {
+          replies: updatedReplies,
+        }).catch((err) => checkAndHandleQuotaError(err));
+      }
+    } catch (err) {
+      checkAndHandleQuotaError(err);
     }
-  } catch (err) {
-    console.warn('Toggle reply like warning:', err);
   }
 
   return { likes: finalLikes, isLiked: isLikedNow };
@@ -1747,10 +1803,12 @@ export const deleteComment = async (commentId: string): Promise<void> => {
   }
 
   // 3. Firestore delete if available
-  try {
-    await deleteDoc(doc(db, 'comments', commentId)).catch(() => {});
-  } catch (err) {
-    console.warn('Firestore delete comment warning:', err);
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      await deleteDoc(doc(db, 'comments', commentId)).catch((err) => checkAndHandleQuotaError(err));
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
   }
 };
 
@@ -1846,6 +1904,7 @@ export const subscribeToReaderLetters = (
           }
         },
         (err) => {
+          checkAndHandleQuotaError(err);
           console.warn('Firestore reader letters snapshot error (using local engine):', err);
         }
       );
@@ -1918,28 +1977,30 @@ export const sendReaderLetter = async (letter: {
   }
 
   // 4. Non-blocking asynchronous sync to Firestore
-  try {
-    const cleanDoc = {
-      sender: newLetter.sender,
-      senderEmail: newLetter.senderEmail || null,
-      senderUid: newLetter.senderUid || null,
-      avatar: newLetter.avatar,
-      content: newLetter.content,
-      type: newLetter.type,
-      tag: newLetter.tag,
-      time: 'Vừa xong',
-      createdAt: newLetter.createdAt,
-      likes: 0,
-      replyFromMel: null,
-      repliedAt: null,
-      repliedBy: null,
-      secretLookupCode: secretLookupCode || null,
-    };
-    setDoc(doc(db, 'reader_letters', newId), cleanDoc).catch((err) => {
-      console.warn('Firestore async sync for reader letter warning:', err);
-    });
-  } catch (syncErr) {
-    console.warn('Firestore setDoc call warning:', syncErr);
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const cleanDoc = {
+        sender: newLetter.sender,
+        senderEmail: newLetter.senderEmail || null,
+        senderUid: newLetter.senderUid || null,
+        avatar: newLetter.avatar,
+        content: newLetter.content,
+        type: newLetter.type,
+        tag: newLetter.tag,
+        time: 'Vừa xong',
+        createdAt: newLetter.createdAt,
+        likes: 0,
+        replyFromMel: null,
+        repliedAt: null,
+        repliedBy: null,
+        secretLookupCode: secretLookupCode || null,
+      };
+      setDoc(doc(db, 'reader_letters', newId), cleanDoc).catch((err) => {
+        checkAndHandleQuotaError(err);
+      });
+    } catch (syncErr) {
+      checkAndHandleQuotaError(syncErr);
+    }
   }
 
   return { id: newId, secretLookupCode };
@@ -1979,15 +2040,17 @@ export const replyToReaderLetter = async (
     });
   }
 
-  try {
-    const letterRef = doc(db, 'reader_letters', letterId);
-    await updateDoc(letterRef, {
-      replyFromMel: replyText.trim(),
-      repliedAt: new Date().toISOString(),
-      repliedBy: authorName,
-    }).catch((err) => console.warn('Firestore reply sync warning:', err));
-  } catch (err) {
-    console.warn('Firestore updateDoc warning for reply:', err);
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const letterRef = doc(db, 'reader_letters', letterId);
+      await updateDoc(letterRef, {
+        replyFromMel: replyText.trim(),
+        repliedAt: new Date().toISOString(),
+        repliedBy: authorName,
+      }).catch((err) => checkAndHandleQuotaError(err));
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
   }
 };
 
@@ -2009,12 +2072,14 @@ export const deleteReaderLetter = async (letterId: string): Promise<void> => {
     });
   }
 
-  try {
-    await deleteDoc(doc(db, 'reader_letters', letterId)).catch((err) => {
-      console.warn('Firestore delete letter warning:', err);
-    });
-  } catch (err) {
-    console.warn('deleteDoc error:', err);
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      await deleteDoc(doc(db, 'reader_letters', letterId)).catch((err) => {
+        checkAndHandleQuotaError(err);
+      });
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
   }
 };
 
@@ -2041,13 +2106,15 @@ export const toggleLetterLike = async (letterId: string): Promise<void> => {
     });
   }
 
-  try {
-    const letterRef = doc(db, 'reader_letters', letterId);
-    await updateDoc(letterRef, {
-      likes: increment(1),
-    }).catch((err) => console.warn('Firestore like letter warning:', err));
-  } catch (err) {
-    console.warn('toggleLetterLike warning:', err);
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const letterRef = doc(db, 'reader_letters', letterId);
+      await updateDoc(letterRef, {
+        likes: increment(1),
+      }).catch((err) => checkAndHandleQuotaError(err));
+    } catch (err) {
+      checkAndHandleQuotaError(err);
+    }
   }
 };
 
@@ -2241,8 +2308,8 @@ const cleanupLegacyMockDataInFirestore = async () => {
 export const subscribeToPublishedStories = (
   callback: (stories: Story[]) => void
 ): (() => void) => {
-  // 1. Immediately provide current stories
-  const initial = getStoredStories();
+  // 1. Immediately provide current stories sorted newest first
+  const initial = sortStoriesByLatest(getStoredStories());
   callback(initial);
 
   // 2. Register for local broadcasts
@@ -2307,7 +2374,7 @@ export const subscribeToPublishedStories = (
           }
         }
 
-        const updatedList: Story[] = Array.from(mergedMap.values());
+        const updatedList: Story[] = sortStoriesByLatest(Array.from(mergedMap.values()));
         try {
           localStorage.setItem('mel_published_stories', JSON.stringify(updatedList));
         } catch {}
@@ -2565,14 +2632,8 @@ export const publishStory = async (story: Story): Promise<{
   // 4. Synchronously persist into localStorage & runtime memory cache (INSTANT 0ms lag)
   try {
     const currentList = getStoredStories();
-    const idx = currentList.findIndex((s) => s.id === cleanStory.id);
-    let updatedList: Story[];
-    if (idx >= 0) {
-      updatedList = [...currentList];
-      updatedList[idx] = cleanStory;
-    } else {
-      updatedList = [cleanStory, ...currentList];
-    }
+    const filtered = currentList.filter((s) => s.id !== cleanStory.id);
+    const updatedList = sortStoriesByLatest([cleanStory, ...filtered]);
     localStorage.setItem('mel_published_stories', JSON.stringify(updatedList));
     notifyStorySubscribers(updatedList);
   } catch (localErr) {
@@ -3114,8 +3175,9 @@ export const publishChapter = async (chapter: Chapter): Promise<{
     if (target) {
       target.completedChapters = allChapters.length;
       target.updatedAt = nowIso;
-      localStorage.setItem('mel_published_stories', JSON.stringify(stories));
-      notifyStorySubscribers(stories);
+      const reSorted = sortStoriesByLatest(stories);
+      localStorage.setItem('mel_published_stories', JSON.stringify(reSorted));
+      notifyStorySubscribers(reSorted);
     }
   } catch (err) {
     console.warn('Update story chapters count warning:', err);
@@ -3320,8 +3382,8 @@ export const deleteChapter = async (storyId: string, chapterId: string): Promise
 export const subscribeToAnnouncements = (
   callback: (announcements: Announcement[]) => void
 ): (() => void) => {
-  // 1. Provide stored announcements immediately
-  callback(getStoredAnnouncements());
+  // 1. Provide stored announcements immediately (sorted)
+  callback(sortAnnouncements(getStoredAnnouncements()));
 
   // 2. Register active memory listener
   activeAnnouncementSubscribers.add(callback);
@@ -3344,7 +3406,7 @@ export const subscribeToAnnouncements = (
           map.set(a.id, { ...ex, ...a });
         }
       });
-      const merged = Array.from(map.values());
+      const merged = sortAnnouncements(Array.from(map.values()));
       try {
         localStorage.setItem('mel_announcements', JSON.stringify(merged));
       } catch {}
@@ -3398,7 +3460,7 @@ export const subscribeToAnnouncements = (
   if (!checkIsFirestoreBlocked()) {
     try {
       const coll = collection(db, 'announcements');
-      const q = query(coll, orderBy('date', 'desc'), limit(20));
+      const q = query(coll, limit(50));
 
       unsubFirestore = onSnapshot(
         q,
@@ -3408,10 +3470,12 @@ export const subscribeToAnnouncements = (
             snapshot.forEach((d) => {
               list.push({ ...(d.data() as Announcement), id: d.id });
             });
+            const sorted = sortAnnouncements(list);
             try {
-              localStorage.setItem('mel_announcements', JSON.stringify(list));
+              localStorage.setItem('mel_announcements', JSON.stringify(sorted));
             } catch {}
-            callback(list);
+            callback(sorted);
+            notifyAnnouncementSubscribers(sorted);
           }
         },
         (err) => {
@@ -3443,13 +3507,14 @@ export const publishAnnouncement = async (announcement: Announcement): Promise<v
     tag: announcement.tag || 'Thông báo',
     content: announcement.content.trim(),
     date: announcement.date || new Date().toLocaleDateString('vi-VN'),
+    createdAt: (announcement as any).createdAt || new Date().toISOString(),
     isPinned: Boolean(announcement.isPinned),
   };
 
   let updatedAnnouncements: Announcement[] = [];
   try {
     const current = getStoredAnnouncements();
-    updatedAnnouncements = [cleanAnn, ...current.filter((a) => a.id !== cleanAnn.id)];
+    updatedAnnouncements = sortAnnouncements([cleanAnn, ...current.filter((a) => a.id !== cleanAnn.id)]);
     localStorage.setItem('mel_announcements', JSON.stringify(updatedAnnouncements));
     notifyAnnouncementSubscribers(updatedAnnouncements);
   } catch (err) {

@@ -126,6 +126,7 @@ app.get('/api/sync', (req: Request, res: Response) => {
     announcements: getAllAnnouncements(),
     tracks: getAllTracks(),
     letters: getAllLetters(),
+    comments: getAllComments(),
     genres: getAllGenres(),
     timestamp: Date.now(),
   });

@@ -170,6 +170,45 @@ const writeJsonSafe = (filePath: string, data: any) => {
 let lastStoriesMtime = 0;
 let lastChaptersMtime = 0;
 let lastAnnouncementsMtime = 0;
+let lastLettersMtime = 0;
+let lastCommentsMtime = 0;
+
+export const parseSafeTimestamp = (dateStr?: string): number => {
+  if (!dateStr) return 0;
+  if (dateStr === 'Vừa đăng' || dateStr === 'Vừa cập nhật' || dateStr.includes('Vừa') || dateStr === 'Vừa xong') {
+    return Date.now();
+  }
+  const parsed = new Date(dateStr).getTime();
+  if (!isNaN(parsed) && parsed > 0) return parsed;
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr)) {
+    const [d, m, y] = dateStr.split('/');
+    const dTime = new Date(Number(y), Number(m) - 1, Number(d)).getTime();
+    if (!isNaN(dTime)) return dTime;
+  }
+  return 0;
+};
+
+export const sortStoriesByLatest = (list: Story[]): Story[] => {
+  return [...list].sort((a, b) => {
+    const timeA = parseSafeTimestamp(a.updatedAt);
+    const timeB = parseSafeTimestamp(b.updatedAt);
+    if (timeA !== timeB) {
+      return timeB - timeA;
+    }
+    return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+  });
+};
+
+export const sortAnnouncements = (list: Announcement[]): Announcement[] => {
+  return [...list].sort((a, b) => {
+    if (a.isPinned && !b.isPinned) return -1;
+    if (!a.isPinned && b.isPinned) return 1;
+    const timeA = parseSafeTimestamp((a as any).createdAt || a.date);
+    const timeB = parseSafeTimestamp((b as any).createdAt || b.date);
+    if (timeA !== timeB) return timeB - timeA;
+    return (b.id || '').localeCompare(a.id || '');
+  });
+};
 
 const reloadStoriesIfChanged = () => {
   try {
@@ -179,7 +218,7 @@ const reloadStoriesIfChanged = () => {
         const content = fs.readFileSync(STORIES_FILE, 'utf-8');
         const parsed = JSON.parse(content);
         if (Array.isArray(parsed)) {
-          cachedStories = parsed;
+          cachedStories = sortStoriesByLatest(parsed);
           lastStoriesMtime = stat.mtimeMs;
         }
       }
@@ -211,8 +250,44 @@ const reloadAnnouncementsIfChanged = () => {
         const content = fs.readFileSync(ANNOUNCEMENTS_FILE, 'utf-8');
         const parsed = JSON.parse(content);
         if (Array.isArray(parsed)) {
-          cachedAnnouncements = parsed;
+          cachedAnnouncements = sortAnnouncements(parsed);
           lastAnnouncementsMtime = stat.mtimeMs;
+        }
+      }
+    }
+  } catch {}
+};
+
+const reloadLettersIfChanged = () => {
+  try {
+    if (fs.existsSync(LETTERS_FILE)) {
+      const stat = fs.statSync(LETTERS_FILE);
+      if (stat.mtimeMs !== lastLettersMtime) {
+        const content = fs.readFileSync(LETTERS_FILE, 'utf-8');
+        const parsed = JSON.parse(content);
+        if (Array.isArray(parsed)) {
+          cachedLetters = parsed.sort(
+            (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+          );
+          lastLettersMtime = stat.mtimeMs;
+        }
+      }
+    }
+  } catch {}
+};
+
+const reloadCommentsIfChanged = () => {
+  try {
+    if (fs.existsSync(COMMENTS_FILE)) {
+      const stat = fs.statSync(COMMENTS_FILE);
+      if (stat.mtimeMs !== lastCommentsMtime) {
+        const content = fs.readFileSync(COMMENTS_FILE, 'utf-8');
+        const parsed = JSON.parse(content);
+        if (Array.isArray(parsed)) {
+          cachedComments = parsed.sort(
+            (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+          );
+          lastCommentsMtime = stat.mtimeMs;
         }
       }
     }
@@ -349,7 +424,7 @@ export const toSlug = (str: string = ''): string => {
 // Stories Operations
 export const getAllStories = (): Story[] => {
   reloadStoriesIfChanged();
-  return [...cachedStories];
+  return sortStoriesByLatest(cachedStories);
 };
 
 export const getStoryById = (id: string): Story | undefined => {
@@ -383,14 +458,14 @@ export const getStoryById = (id: string): Story | undefined => {
 };
 
 export const saveStory = (story: Story): Story => {
-  const index = cachedStories.findIndex((s) => s.id === story.id);
-  if (index >= 0) {
-    cachedStories[index] = { ...cachedStories[index], ...story };
-  } else {
-    cachedStories = [story, ...cachedStories];
-  }
+  const storyWithTime: Story = {
+    ...story,
+    updatedAt: story.updatedAt || new Date().toISOString(),
+  };
+  const filtered = cachedStories.filter((s) => s.id !== story.id);
+  cachedStories = sortStoriesByLatest([storyWithTime, ...filtered]);
   writeJsonSafe(STORIES_FILE, cachedStories);
-  return story;
+  return storyWithTime;
 };
 
 export const deleteStory = (storyId: string): boolean => {
@@ -451,6 +526,7 @@ export const saveChapter = (chapter: Chapter): Chapter => {
   if (storyIdx >= 0) {
     cachedStories[storyIdx].completedChapters = list.length;
     cachedStories[storyIdx].updatedAt = new Date().toISOString();
+    cachedStories = sortStoriesByLatest(cachedStories);
     writeJsonSafe(STORIES_FILE, cachedStories);
   }
 
@@ -467,6 +543,7 @@ export const deleteChapter = (storyId: string, chapterId: string): boolean => {
     if (storyIdx >= 0) {
       cachedStories[storyIdx].completedChapters = cachedChapters[storyId].length;
       cachedStories[storyIdx].updatedAt = new Date().toISOString();
+      cachedStories = sortStoriesByLatest(cachedStories);
       writeJsonSafe(STORIES_FILE, cachedStories);
     }
     return true;
@@ -477,18 +554,19 @@ export const deleteChapter = (storyId: string, chapterId: string): boolean => {
 // Announcements Operations
 export const getAllAnnouncements = (): Announcement[] => {
   reloadAnnouncementsIfChanged();
-  return [...cachedAnnouncements];
+  return sortAnnouncements(cachedAnnouncements);
 };
 
 export const saveAnnouncement = (ann: Announcement): Announcement => {
-  const index = cachedAnnouncements.findIndex((a) => a.id === ann.id);
-  if (index >= 0) {
-    cachedAnnouncements[index] = { ...cachedAnnouncements[index], ...ann };
-  } else {
-    cachedAnnouncements = [ann, ...cachedAnnouncements];
-  }
+  const annWithTime: Announcement = {
+    ...ann,
+    date: ann.date || new Date().toLocaleDateString('vi-VN'),
+    createdAt: (ann as any).createdAt || new Date().toISOString(),
+  };
+  const filtered = cachedAnnouncements.filter((a) => a.id !== ann.id);
+  cachedAnnouncements = sortAnnouncements([annWithTime, ...filtered]);
   writeJsonSafe(ANNOUNCEMENTS_FILE, cachedAnnouncements);
-  return ann;
+  return annWithTime;
 };
 
 export const deleteAnnouncement = (announcementId: string): boolean => {
@@ -527,18 +605,23 @@ export const deleteTrack = (trackId: string): boolean => {
 
 // Reader Letters Operations
 export const getAllLetters = (): ReaderLetter[] => {
-  return [...cachedLetters];
+  reloadLettersIfChanged();
+  return [...cachedLetters].sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
 };
 
 export const saveLetter = (letter: ReaderLetter): ReaderLetter => {
-  const index = cachedLetters.findIndex((l) => l.id === letter.id);
-  if (index >= 0) {
-    cachedLetters[index] = { ...cachedLetters[index], ...letter };
-  } else {
-    cachedLetters = [letter, ...cachedLetters];
-  }
+  const letterWithTime: ReaderLetter = {
+    ...letter,
+    createdAt: letter.createdAt || new Date().toISOString(),
+  };
+  const filtered = cachedLetters.filter((l) => l.id !== letter.id);
+  cachedLetters = [letterWithTime, ...filtered].sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
   writeJsonSafe(LETTERS_FILE, cachedLetters);
-  return letter;
+  return letterWithTime;
 };
 
 export const replyLetter = (letterId: string, replyText: string, authorName: string = 'Mellifluous (Tác giả)'): ReaderLetter | undefined => {
@@ -574,6 +657,7 @@ export const likeLetter = (letterId: string): { likes: number } | undefined => {
 
 // Comments Operations
 export const getAllComments = (storyId?: string, chapterNumber?: number): RealtimeComment[] => {
+  reloadCommentsIfChanged();
   let list = [...cachedComments];
   if (storyId) {
     list = list.filter((c) => c.storyId === storyId);
@@ -581,18 +665,22 @@ export const getAllComments = (storyId?: string, chapterNumber?: number): Realti
   if (chapterNumber !== undefined && chapterNumber !== null) {
     list = list.filter((c) => c.chapterNumber === chapterNumber || !c.chapterNumber);
   }
-  return list;
+  return list.sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
 };
 
 export const saveComment = (comment: RealtimeComment): RealtimeComment => {
-  const index = cachedComments.findIndex((c) => c.id === comment.id);
-  if (index >= 0) {
-    cachedComments[index] = { ...cachedComments[index], ...comment };
-  } else {
-    cachedComments = [comment, ...cachedComments];
-  }
+  const commentWithTime: RealtimeComment = {
+    ...comment,
+    createdAt: comment.createdAt || new Date().toISOString(),
+  };
+  const filtered = cachedComments.filter((c) => c.id !== comment.id);
+  cachedComments = [commentWithTime, ...filtered].sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
   writeJsonSafe(COMMENTS_FILE, cachedComments);
-  return comment;
+  return commentWithTime;
 };
 
 export const replyComment = (commentId: string, reply: CommentReply): RealtimeComment | undefined => {

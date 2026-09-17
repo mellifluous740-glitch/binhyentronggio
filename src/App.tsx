@@ -2,7 +2,13 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate, useParams } from 'react-router-dom';
 import { ActiveTab, Story, Announcement, RecentUpdate } from './types';
 import { STORIES, ANNOUNCEMENTS, RECENT_UPDATES, getStoryChapters, isStoryDeleted } from './data/mockData';
-import { subscribeToPublishedStories, subscribeToAnnouncements, subscribeToAllChapters } from './lib/realtimeService';
+import {
+  subscribeToPublishedStories,
+  subscribeToAnnouncements,
+  subscribeToAllChapters,
+  sortStoriesByLatest,
+  sortAnnouncements,
+} from './lib/realtimeService';
 import { AuthorPublishModal } from './components/AuthorPublishModal';
 import { Navbar } from './components/Navbar';
 import { HeroIntro } from './components/HeroIntro';
@@ -105,17 +111,15 @@ export default function App() {
 
   const [isSearchOpen, setIsSearchOpen] = useState<boolean>(false);
   const [isAuthorModalOpen, setIsAuthorModalOpen] = useState<boolean>(false);
-  const [stories, setStories] = useState<Story[]>(STORIES);
-  const [announcements, setAnnouncements] = useState<Announcement[]>(ANNOUNCEMENTS);
+  const [stories, setStories] = useState<Story[]>(() => sortStoriesByLatest(STORIES));
+  const [announcements, setAnnouncements] = useState<Announcement[]>(() => sortAnnouncements(ANNOUNCEMENTS));
   const [chaptersVersion, setChaptersVersion] = useState<number>(0);
 
   // Real-time synchronization of published stories, chapters & announcements across all devices
   useEffect(() => {
     const unsubStories = subscribeToPublishedStories((liveStories) => {
-      if (Array.isArray(liveStories) && liveStories.length > 0) {
-        setStories(liveStories);
-      } else if (Array.isArray(liveStories)) {
-        setStories(liveStories);
+      if (Array.isArray(liveStories)) {
+        setStories(sortStoriesByLatest(liveStories));
       }
     });
 
@@ -124,10 +128,10 @@ export default function App() {
     });
 
     const unsubAnn = subscribeToAnnouncements((liveAnn) => {
-      if (liveAnn && liveAnn.length > 0) {
-        setAnnouncements(liveAnn);
+      if (Array.isArray(liveAnn) && liveAnn.length > 0) {
+        setAnnouncements(sortAnnouncements(liveAnn));
       } else {
-        setAnnouncements(ANNOUNCEMENTS);
+        setAnnouncements(sortAnnouncements(ANNOUNCEMENTS));
       }
     });
 
@@ -276,18 +280,21 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'instant' });
   };
 
-  const completedStories = stories.filter((s) => s.status === 'completed');
-  const ongoingStories = stories.filter((s) => s.status === 'ongoing');
+  const completedStories = useMemo(() => sortStoriesByLatest(stories.filter((s) => s.status === 'completed')), [stories]);
+  const ongoingStories = useMemo(() => sortStoriesByLatest(stories.filter((s) => s.status === 'ongoing')), [stories]);
   const completedCount = completedStories.length;
   const ongoingCount = ongoingStories.length;
   const totalStoriesCount = stories.length;
 
-  const filteredStories = stories.filter((story) => {
-    if (storyFilter === 'completed' && story.status !== 'completed') return false;
-    if (storyFilter === 'ongoing' && story.status !== 'ongoing') return false;
-    if (selectedGenreFilter !== 'all' && !story.genre.includes(selectedGenreFilter)) return false;
-    return true;
-  });
+  const filteredStories = useMemo(() => {
+    const list = stories.filter((story) => {
+      if (storyFilter === 'completed' && story.status !== 'completed') return false;
+      if (storyFilter === 'ongoing' && story.status !== 'ongoing') return false;
+      if (selectedGenreFilter !== 'all' && !story.genre.includes(selectedGenreFilter)) return false;
+      return true;
+    });
+    return sortStoriesByLatest(list);
+  }, [stories, storyFilter, selectedGenreFilter]);
 
   const modalStory = modalStoryId ? stories.find((s) => s.id === modalStoryId) || null : null;
 

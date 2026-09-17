@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Story, Announcement, RecentUpdate } from '../types';
 import { StoryCard } from './StoryCard';
 import { Sidebar } from './Sidebar';
+import { sortStoriesByLatest } from '../lib/realtimeService';
 import {
   CheckCircle2,
   Sparkles,
@@ -42,13 +43,13 @@ export const CompletedStoriesView: React.FC<CompletedStoriesViewProps> = ({
   );
 
   // Apply genre filter and sorting
-  const filtered = completedStories
-    .filter((s) => (selectedGenre === 'all' ? true : s.genre.includes(selectedGenre)))
-    .sort((a, b) => {
-      if (sortBy === 'views') return b.views - a.views;
-      if (sortBy === 'likes') return b.likes - a.likes;
-      return 0; // Default order
-    });
+  const filtered = sortStoriesByLatest(
+    completedStories.filter((s) => (selectedGenre === 'all' ? true : s.genre.includes(selectedGenre)))
+  ).sort((a, b) => {
+    if (sortBy === 'views') return b.views - a.views;
+    if (sortBy === 'likes') return b.likes - a.likes;
+    return 0; // Handled by sortStoriesByLatest
+  });
 
   const totalViews = completedStories.reduce((acc, curr) => acc + curr.views, 0);
   const totalLikes = completedStories.reduce((acc, curr) => acc + curr.likes, 0);

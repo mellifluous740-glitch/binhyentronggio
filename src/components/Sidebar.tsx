@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { Story, Announcement, RecentUpdate } from '../types';
 import { SUMMER_QUOTES, isStoryDeleted } from '../data/mockData';
+import { sortAnnouncements } from '../lib/realtimeService';
 import { SidebarStoryDropdown } from './SidebarStoryDropdown';
 import { SidebarGenreDropdown } from './SidebarGenreDropdown';
 
@@ -69,12 +70,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const [showOlderAnnouncements, setShowOlderAnnouncements] = useState(false);
 
-  // Sắp xếp thông báo: Đang ghim lên trước, sau đó theo thứ tự mảng/thời gian
-  const sortedAnnouncements = [...announcements].sort((a, b) => {
-    if (a.isPinned && !b.isPinned) return -1;
-    if (!a.isPinned && b.isPinned) return 1;
-    return 0;
-  });
+  // Sắp xếp thông báo: Đang ghim lên trước, sau đó theo thời gian mới nhất
+  const sortedAnnouncements = sortAnnouncements(announcements);
 
   const INITIAL_VISIBLE_COUNT = 3;
   const displayedAnnouncements = showOlderAnnouncements

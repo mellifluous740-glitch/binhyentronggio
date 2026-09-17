@@ -46,6 +46,7 @@ export interface Announcement {
   tag: 'Thông báo' | 'Lịch đăng' | 'Nhắc nhở' | 'Lưu ý';
   content: string;
   date: string;
+  createdAt?: string;
   isPinned?: boolean;
 }
 

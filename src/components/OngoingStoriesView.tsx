@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Story, Announcement, RecentUpdate } from '../types';
 import { StoryCard } from './StoryCard';
 import { Sidebar } from './Sidebar';
+import { sortStoriesByLatest } from '../lib/realtimeService';
 import {
   Clock,
   Sparkles,
@@ -41,13 +42,13 @@ export const OngoingStoriesView: React.FC<OngoingStoriesViewProps> = ({
   );
 
   // Apply genre filter and sorting
-  const filtered = ongoingStories
-    .filter((s) => (selectedGenre === 'all' ? true : s.genre.includes(selectedGenre)))
-    .sort((a, b) => {
-      if (sortBy === 'views') return b.views - a.views;
-      if (sortBy === 'likes') return b.likes - a.likes;
-      return 0;
-    });
+  const filtered = sortStoriesByLatest(
+    ongoingStories.filter((s) => (selectedGenre === 'all' ? true : s.genre.includes(selectedGenre)))
+  ).sort((a, b) => {
+    if (sortBy === 'views') return b.views - a.views;
+    if (sortBy === 'likes') return b.likes - a.likes;
+    return 0; // Handled by sortStoriesByLatest
+  });
 
   return (
     <div id="ongoing-stories-page" className="space-y-8 animate-in fade-in duration-300 pb-12">
