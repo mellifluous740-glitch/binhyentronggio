@@ -1,0 +1,56 @@
+# Thay YOUR_GITHUB_ACCOUNT bằng tài khoản sở hữu repository trước khi dùng /admin/.
+# OAuth proxy là bắt buộc khi trang được triển khai trên GitHub Pages; xem README.
+backend:
+  name: github
+  repo: YOUR_GITHUB_ACCOUNT/binhyentronggio
+  branch: main
+  base_url: https://YOUR-OAUTH-PROXY.example.com
+  auth_endpoint: auth
+media_folder: assets/uploads
+public_folder: /assets/uploads
+locale: vi
+collections:
+  - name: stories
+    label: Truyện
+    folder: _stories
+    create: true
+    slug: "{{slug}}"
+    extension: md
+    fields:
+      - {label: Tiêu đề, name: title, widget: string}
+      - {label: Mã truyện, name: story_id, widget: string, hint: "Dùng mã ngắn, không đổi sau khi đăng."}
+      - {label: Tác giả, name: author, widget: string}
+      - {label: Người dịch, name: translator, widget: string, default: Mellifluous}
+      - {label: Trạng thái, name: status, widget: select, options: [ongoing, completed]}
+      - {label: Thể loại, name: genres, widget: list}
+      - {label: Giới thiệu, name: summary, widget: text}
+      - {label: Ảnh bìa, name: cover_image, widget: image, required: false}
+      - {label: Cập nhật lúc, name: updated_at, widget: datetime}
+      - {label: Đường dẫn, name: permalink, widget: string, hint: "/truyen/ten-truyen/"}
+  - name: chapters
+    label: Chương
+    folder: _chapters
+    create: true
+    slug: "{{story_id}}-{{chapter_number}}"
+    extension: md
+    fields:
+      - {label: Tiêu đề, name: title, widget: string}
+      - {label: Mã truyện, name: story_id, widget: string}
+      - {label: Số chương, name: chapter_number, widget: number, value_type: int, min: 1}
+      - {label: Ngày đăng, name: published_at, widget: datetime}
+      - {label: Cập nhật lúc, name: updated_at, widget: datetime, required: false}
+      - {label: Đường dẫn, name: permalink, widget: string, hint: "/truyen/ten-truyen/chuong-1/"}
+      - {label: Nội dung, name: body, widget: markdown}
+  - name: announcements
+    label: Thông báo
+    folder: _announcements
+    create: true
+    slug: "{{slug}}"
+    extension: md
+    fields:
+      - {label: Tiêu đề, name: title, widget: string}
+      - {label: Ngày, name: date, widget: string, hint: DD/MM/YYYY}
+      - {label: Nhãn, name: tag, widget: string, default: Thông báo}
+      - {label: Ghim, name: pinned, widget: boolean, default: false}
+      - {label: Đường dẫn, name: permalink, widget: string, hint: "/thong-bao/ten-thong-bao/"}
+      - {label: Nội dung, name: body, widget: markdown}
