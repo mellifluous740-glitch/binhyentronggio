@@ -1,20 +1,31 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Bình Yên Trong Gió
 
-# Run and deploy your AI Studio app
+Đây là trang đọc truyện tĩnh xây dựng bằng **Jekyll**. Nội dung được quản lý ngay trong repository, không cần Node.js server, dịch vụ cơ sở dữ liệu bên ngoài hoặc biến môi trường đám mây.
 
-This contains everything you need to run your app locally.
+## Cấu trúc nội dung
 
-View your app in AI Studio: https://ai.studio/apps/d8f06022-1bfe-45dd-8044-6b2703e44642
+- `_stories/`: mỗi truyện là một tệp Markdown có metadata ở front matter.
+- `_chapters/`: mỗi chương là một tệp Markdown, liên kết với truyện bằng `story_id`.
+- `_data/announcements.json`: thông báo hiển thị ở trang chủ.
+- `assets/`: CSS và các tài nguyên tĩnh.
 
-## Run Locally
+Để thêm truyện hoặc chương, tạo tệp Markdown mới trong collection tương ứng. Ví dụ chương cần `story_id`, `chapter_number`, `title` và `permalink` trong front matter.
 
-**Prerequisites:**  Node.js
+## Chạy cục bộ
 
+Yêu cầu Ruby và Bundler:
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+```bash
+bundle install
+bundle exec jekyll serve
+```
+
+Mở địa chỉ được Jekyll hiển thị. Build kiểm tra tĩnh bằng:
+
+```bash
+bundle exec jekyll build
+```
+
+## Triển khai
+
+Workflow GitHub Pages tại `.github/workflows/deploy.yml` dùng `actions/jekyll-build-pages` và tạo artifact từ `_site` mà không cài Node packages hay truyền secrets của dịch vụ bên ngoài.
