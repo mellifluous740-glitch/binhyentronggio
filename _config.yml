@@ -1,0 +1,43 @@
+title: Bình Yên Trong Gió
+email: ""
+description: >-
+  Góc đọc truyện nhẹ nhàng của Mellifluous.
+baseurl: /binhyentronggio
+url: ""
+lang: vi
+markdown: kramdown
+permalink: pretty
+collections:
+  stories:
+    output: true
+  chapters:
+    output: true
+  announcements:
+    output: true
+defaults:
+  - scope:
+      path: ""
+      type: stories
+    values:
+      layout: story
+  - scope:
+      path: ""
+      type: chapters
+    values:
+      layout: chapter
+  - scope:
+      path: ""
+      type: announcements
+    values:
+      layout: announcement
+comments:
+  provider: giscus
+  enabled: false
+  repo: ""
+  repo_id: ""
+  category: ""
+  category_id: ""
+exclude:
+  - node_modules
+  - package.json
+  - package-lock.json

@@ -1,0 +1,5 @@
+---
+layout: default
+---
+{% assign story = site.stories | where: 'story_id', page.story_id | first %}
+<article class="reader"><a class="back" href="{{ story.url | relative_url }}">← {{ story.title | default: 'Quay lại truyện' }}</a><header><p class="eyebrow">{{ story.title }}</p><h1>Chương {{ page.chapter_number }}{% if page.title %}: {{ page.title }}{% endif %}</h1></header><div class="chapter-content">{{ content }}</div>{% include comments.html %}</article>
