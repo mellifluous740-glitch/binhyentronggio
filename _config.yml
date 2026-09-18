@@ -12,6 +12,8 @@ collections:
     output: true
   chapters:
     output: true
+  announcements:
+    output: true
 defaults:
   - scope:
       path: ""
@@ -23,6 +25,18 @@ defaults:
       type: chapters
     values:
       layout: chapter
+  - scope:
+      path: ""
+      type: announcements
+    values:
+      layout: announcement
+comments:
+  provider: giscus
+  enabled: false
+  repo: ""
+  repo_id: ""
+  category: ""
+  category_id: ""
 exclude:
   - node_modules
   - package.json
