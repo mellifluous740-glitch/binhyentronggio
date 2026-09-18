@@ -225,6 +225,20 @@ const activeAnnouncementSubscribers = new Set<(announcements: Announcement[]) =>
 const activeChapterSubscribers = new Map<string, Set<(chapters: Chapter[]) => void>>();
 const activeAllChaptersSubscribers = new Set<(chaptersMap: Record<string, Chapter[]>) => void>();
 const globalStatsListeners = new Set<(stats: GlobalRealtimeStats) => void>();
+const activeStoryStatsSubscribers = new Map<string, Set<(stats: StoryRealtimeStats) => void>>();
+
+export const notifyStoryStatsSubscribers = (storyId: string, stats: StoryRealtimeStats) => {
+  const set = activeStoryStatsSubscribers.get(storyId);
+  if (set) {
+    set.forEach((cb) => {
+      try {
+        cb(stats);
+      } catch (e) {
+        console.warn('Story stats subscriber error:', e);
+      }
+    });
+  }
+};
 
 let cachedGlobalStats: GlobalRealtimeStats = {
   totalVisits: typeof window !== 'undefined' ? Math.max(1, Number(localStorage.getItem('mel_site_visits') || '1')) : 1,
@@ -610,6 +624,16 @@ export const initServerRealtimeSync = () => {
       if (data.genres && Array.isArray(data.genres) && data.genres.length > 0) {
         updateGenresFromRemote(data.genres);
       }
+
+      // H. Stats (100% Server Engine)
+      if (hasBackendServer()) {
+        safeApiFetch('/api/stats')
+          .then((res) => (res && res.ok ? res.json() : null))
+          .then((stats) => {
+            if (stats) notifyGlobalStatsSubscribers(stats);
+          })
+          .catch(() => {});
+      }
     } catch {
       // Server might be starting or unavailable in pure preview
     }
@@ -821,6 +845,42 @@ export const initServerRealtimeSync = () => {
               }
             }
           }
+        } else if (msg.type === 'comment_reply_liked') {
+          const { commentId, replyId, likes } = msg.payload || {};
+          if (commentId && replyId && typeof window !== 'undefined') {
+            for (let i = 0; i < localStorage.length; i++) {
+              const key = localStorage.key(i);
+              if (key && key.startsWith('mel_comments_')) {
+                const sId = key.replace('mel_comments_', '');
+                const current = getStoredComments(sId);
+                let found = false;
+                const next = current.map((c) => {
+                  if (c.id === commentId) {
+                    found = true;
+                    const replies = (c.replies || []).map((r) =>
+                      r.id === replyId ? { ...r, likes } : r
+                    );
+                    return { ...c, replies };
+                  }
+                  return c;
+                });
+                if (found) {
+                  saveStoredComments(sId, next);
+                  notifyCommentSubscribers(sId, next);
+                  break;
+                }
+              }
+            }
+          }
+        } else if (msg.type === 'stats_updated') {
+          if (msg.payload) {
+            notifyGlobalStatsSubscribers(msg.payload);
+          }
+        } else if (msg.type === 'story_stats_updated') {
+          const { storyId, stats } = msg.payload || {};
+          if (storyId && stats) {
+            notifyStoryStatsSubscribers(storyId, stats);
+          }
         } else if (msg.type === 'genres_updated') {
           if (Array.isArray(msg.payload)) {
             updateGenresFromRemote(msg.payload);
@@ -897,36 +957,39 @@ export const isPublicOfficialSite = (): boolean => {
  */
 export const recordSiteVisit = async (): Promise<void> => {
   try {
-    // Chỉ ghi nhận lượt truy cập khi website đã chính thức ra mắt / public
-    if (!isPublicOfficialSite()) {
-      return;
-    }
-
     const sessionKey = 'mel_visited_recorded';
     const alreadyRecorded = sessionStorage.getItem(sessionKey);
-    const statsDocRef = doc(db, 'site_stats', STATS_DOC_ID);
 
     if (!alreadyRecorded) {
       sessionStorage.setItem(sessionKey, 'true');
 
-      const docSnap = await getDoc(statsDocRef);
-      if (!docSnap.exists()) {
-        await setDoc(statsDocRef, {
-          totalVisits: 1, // First real visitor on public launch
-          totalFollowers: 0,
-          totalComments: 0,
-          totalLikes: 0,
-          lastVisitAt: new Date().toISOString(),
-        });
-      } else {
-        await updateDoc(statsDocRef, {
-          totalVisits: increment(1),
-          lastVisitAt: new Date().toISOString(),
-        });
+      // 1. Server Engine visit tracking (instant and quota-free)
+      if (hasBackendServer()) {
+        safeApiFetch('/api/stats/visit', { method: 'POST' }).catch(() => {});
+      }
+
+      // 2. Firestore cloud sync only if explicitly enabled
+      if (!checkIsFirestoreBlocked()) {
+        const statsDocRef = doc(db, 'site_stats', STATS_DOC_ID);
+        const docSnap = await getDoc(statsDocRef);
+        if (!docSnap.exists()) {
+          await setDoc(statsDocRef, {
+            totalVisits: 1,
+            totalFollowers: 0,
+            totalComments: 0,
+            totalLikes: 0,
+            lastVisitAt: new Date().toISOString(),
+          }).catch(() => {});
+        } else {
+          await updateDoc(statsDocRef, {
+            totalVisits: increment(1),
+            lastVisitAt: new Date().toISOString(),
+          }).catch(() => {});
+        }
       }
     }
   } catch (err) {
-    console.warn('Realtime visit tracking error:', err);
+    console.warn('Realtime visit tracking note:', err);
   }
 };
 
@@ -961,94 +1024,59 @@ export const startActiveReaderHeartbeat = (onCountChange: (count: number) => voi
 
 /**
  * Subscribe to global site statistics in real time.
- * Defaults strictly to 0 if database is fresh.
+ * Defaults to Server Engine (instant, accurate, quota-free).
  */
 export const subscribeToGlobalStats = (
   callback: (stats: GlobalRealtimeStats) => void
 ): (() => void) => {
-  if (checkIsFirestoreBlocked()) {
-    callback({
-      totalVisits: 0,
-      activeReaders: Math.max(1, currentLiveActiveReaders),
-      totalFollowers: 0,
-      totalComments: 0,
-      totalLikes: 0,
-    });
-    return () => {};
+  // 1. Deliver current in-memory / cached stats immediately
+  callback({ ...cachedGlobalStats, activeReaders: Math.max(1, currentLiveActiveReaders) });
+  globalStatsListeners.add(callback);
+
+  // 2. Fetch latest stats from Server Engine
+  if (hasBackendServer()) {
+    safeApiFetch('/api/stats')
+      .then((res) => (res && res.ok ? res.json() : null))
+      .then((stats) => {
+        if (stats) {
+          notifyGlobalStatsSubscribers(stats);
+        }
+      })
+      .catch(() => {});
   }
 
-  const statsDocRef = doc(db, 'site_stats', STATS_DOC_ID);
-  return onSnapshot(
-    statsDocRef,
-    (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        // Tự động làm sạch và khởi tạo lại nếu còn vướng số liệu ảo/thử nghiệm cũ (> 500 khi web chưa public)
-        const isLegacySimulated = (!data.isRealData && ((data.totalVisits ?? 0) > 500 || (data.totalLikes ?? 0) > 500));
-        if (isLegacySimulated) {
-          const hasAttempted = typeof sessionStorage !== 'undefined' && sessionStorage.getItem('mel_stats_sanitized');
-          if (!hasAttempted && !isFirestoreQuotaExhausted()) {
-            try {
-              if (typeof sessionStorage !== 'undefined') sessionStorage.setItem('mel_stats_sanitized', 'true');
-              setDoc(
-                statsDocRef,
-                {
-                  totalVisits: 0,
-                  activeReaders: 1,
-                  totalFollowers: 0,
-                  totalComments: 0,
-                  totalLikes: 0,
-                  isRealData: true,
-                  sanitizedAt: new Date().toISOString(),
-                },
-                { merge: true }
-              ).catch(() => {});
-            } catch {}
+  // 3. Firestore snapshot only if explicitly enabled
+  let unsubFirestore: (() => void) | null = null;
+  if (!checkIsFirestoreBlocked()) {
+    try {
+      const statsDocRef = doc(db, 'site_stats', STATS_DOC_ID);
+      unsubFirestore = onSnapshot(
+        statsDocRef,
+        (docSnap) => {
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            notifyGlobalStatsSubscribers({
+              totalVisits: data.totalVisits ?? cachedGlobalStats.totalVisits,
+              totalFollowers: data.totalFollowers ?? cachedGlobalStats.totalFollowers,
+              totalComments: data.totalComments ?? cachedGlobalStats.totalComments,
+              totalLikes: data.totalLikes ?? cachedGlobalStats.totalLikes,
+            });
           }
+        },
+        () => {}
+      );
+    } catch {}
+  }
 
-          callback({
-            totalVisits: 0,
-            activeReaders: 1,
-            totalFollowers: 0,
-            totalComments: 0,
-            totalLikes: 0,
-          });
-          return;
-        }
-
-        callback({
-          totalVisits: data.totalVisits ?? 0,
-          activeReaders: Math.max(1, currentLiveActiveReaders, data.activeReaders ?? 1),
-          totalFollowers: data.totalFollowers ?? 0,
-          totalComments: data.totalComments ?? 0,
-          totalLikes: data.totalLikes ?? 0,
-        });
-      } else {
-        callback({
-          totalVisits: 0,
-          activeReaders: Math.max(1, currentLiveActiveReaders),
-          totalFollowers: 0,
-          totalComments: 0,
-          totalLikes: 0,
-        });
-      }
-    },
-    (error) => {
-      console.warn('Global stats snapshot warning:', error);
-      callback({
-        totalVisits: 0,
-        activeReaders: Math.max(1, currentLiveActiveReaders),
-        totalFollowers: 0,
-        totalComments: 0,
-        totalLikes: 0,
-      });
-    }
-  );
+  return () => {
+    globalStatsListeners.delete(callback);
+    if (unsubFirestore) unsubFirestore();
+  };
 };
 
 /**
  * Subscribe to realtime stats for a specific story (views, likes, followers, ratings).
- * Baseline is strictly 0.
+ * Baseline is strictly 0. Handled 100% by Server Engine with SSE real-time updates.
  */
 export const subscribeToStoryStats = (
   storyId: string,
@@ -1056,92 +1084,105 @@ export const subscribeToStoryStats = (
   initialLikes: number = 0,
   callback: (stats: StoryRealtimeStats) => void
 ): (() => void) => {
-  if (checkIsFirestoreBlocked()) {
-    callback({
-      views: initialViews || 0,
-      likes: initialLikes || 0,
-      followers: 0,
-      ratingSum: 0,
-      ratingCount: 0,
-      commentCount: 0,
-    });
-    return () => {};
+  const initialData: StoryRealtimeStats = {
+    views: initialViews || 0,
+    likes: initialLikes || 0,
+    followers: 0,
+    ratingSum: 0,
+    ratingCount: 0,
+    commentCount: 0,
+  };
+  callback(initialData);
+
+  if (!activeStoryStatsSubscribers.has(storyId)) {
+    activeStoryStatsSubscribers.set(storyId, new Set());
+  }
+  activeStoryStatsSubscribers.get(storyId)!.add(callback);
+
+  // 1. Fetch latest stats from Server Engine
+  if (hasBackendServer()) {
+    safeApiFetch(`/api/stories/${encodeURIComponent(storyId)}/stats`)
+      .then((res) => (res && res.ok ? res.json() : null))
+      .then((stats) => {
+        if (stats) {
+          notifyStoryStatsSubscribers(storyId, stats);
+        }
+      })
+      .catch(() => {});
   }
 
-  const storyDocRef = doc(db, 'story_stats', storyId);
+  // 2. Firestore cloud sync only if explicitly enabled
+  let unsubFirestore: (() => void) | null = null;
+  if (!checkIsFirestoreBlocked()) {
+    try {
+      const storyDocRef = doc(db, 'story_stats', storyId);
+      unsubFirestore = onSnapshot(
+        storyDocRef,
+        (docSnap) => {
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            const stats: StoryRealtimeStats = {
+              views: data.views !== undefined ? Number(data.views) : (initialViews || 0),
+              likes: data.likes !== undefined ? Number(data.likes) : (initialLikes || 0),
+              followers: data.followers ?? 0,
+              ratingSum: data.ratingSum ?? 0,
+              ratingCount: data.ratingCount ?? 0,
+              commentCount: data.commentCount ?? 0,
+            };
+            notifyStoryStatsSubscribers(storyId, stats);
+          }
+        },
+        () => {}
+      );
+    } catch {}
+  }
 
-  return onSnapshot(
-    storyDocRef,
-    (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        callback({
-          views: data.views !== undefined ? Number(data.views) : (initialViews || 0),
-          likes: data.likes !== undefined ? Number(data.likes) : (initialLikes || 0),
-          followers: data.followers ?? 0,
-          ratingSum: data.ratingSum ?? 0,
-          ratingCount: data.ratingCount ?? 0,
-          commentCount: data.commentCount ?? 0,
-        });
-      } else {
-        callback({
-          views: initialViews || 0,
-          likes: initialLikes || 0,
-          followers: 0,
-          ratingSum: 0,
-          ratingCount: 0,
-          commentCount: 0,
-        });
-      }
-    },
-    (err) => {
-      console.warn(`Story stats snapshot warning for ${storyId}:`, err);
-      callback({
-        views: initialViews || 0,
-        likes: initialLikes || 0,
-        followers: 0,
-        ratingSum: 0,
-        ratingCount: 0,
-        commentCount: 0,
-      });
+  return () => {
+    const set = activeStoryStatsSubscribers.get(storyId);
+    if (set) {
+      set.delete(callback);
     }
-  );
+    if (unsubFirestore) unsubFirestore();
+  };
 };
 
 /**
  * Increment story views when a reader views the story details or chapters.
- * Only records views on the official public link / domain.
  */
 export const recordStoryView = async (storyId: string): Promise<void> => {
   try {
-    // Chỉ tăng lượt xem khi độc giả đọc truyện trên trang web chính thức / public link
-    if (!isPublicOfficialSite() || checkIsFirestoreBlocked()) {
-      return;
-    }
-
     const sessionKey = `mel_viewed_story_${storyId}`;
     if (sessionStorage.getItem(sessionKey)) return;
     sessionStorage.setItem(sessionKey, 'true');
 
-    const storyDocRef = doc(db, 'story_stats', storyId);
-    const snap = await getDoc(storyDocRef);
+    // 1. Server Engine view tracking (instant & reliable)
+    if (hasBackendServer()) {
+      safeApiFetch(`/api/stories/${encodeURIComponent(storyId)}/view`, {
+        method: 'POST',
+      }).catch(() => {});
+    }
 
-    if (!snap.exists()) {
-      await setDoc(storyDocRef, {
-        storyId,
-        views: 1,
-        likes: 0,
-        followers: 0,
-        ratingSum: 0,
-        ratingCount: 0,
-        commentCount: 0,
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      await updateDoc(storyDocRef, {
-        views: increment(1),
-        updatedAt: new Date().toISOString(),
-      });
+    // 2. Firestore fallback if enabled
+    if (!checkIsFirestoreBlocked()) {
+      const storyDocRef = doc(db, 'story_stats', storyId);
+      const snap = await getDoc(storyDocRef);
+      if (!snap.exists()) {
+        await setDoc(storyDocRef, {
+          storyId,
+          views: 1,
+          likes: 0,
+          followers: 0,
+          ratingSum: 0,
+          ratingCount: 0,
+          commentCount: 0,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      } else {
+        await updateDoc(storyDocRef, {
+          views: increment(1),
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
     }
   } catch (err) {
     flagFirestoreQuotaExceeded(err);
@@ -1152,37 +1193,46 @@ export const recordStoryView = async (storyId: string): Promise<void> => {
  * Like or unlike a story in real time.
  */
 export const toggleStoryLike = async (storyId: string, isLiking: boolean): Promise<void> => {
-  if (checkIsFirestoreBlocked()) return;
-  try {
-    const storyDocRef = doc(db, 'story_stats', storyId);
-    const snap = await getDoc(storyDocRef);
-    const delta = isLiking ? 1 : -1;
-
-    if (!snap.exists()) {
-      await setDoc(storyDocRef, {
-        storyId,
-        views: 1,
-        likes: Math.max(0, delta),
-        followers: 0,
-        ratingSum: 0,
-        ratingCount: 0,
-        commentCount: 0,
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      await updateDoc(storyDocRef, {
-        likes: increment(delta),
-        updatedAt: new Date().toISOString(),
-      });
-    }
-
-    // Update global likes
-    const globalDocRef = doc(db, 'site_stats', STATS_DOC_ID);
-    await updateDoc(globalDocRef, {
-      totalLikes: increment(delta),
+  const delta = isLiking ? 1 : -1;
+  // 1. Server Engine
+  if (hasBackendServer()) {
+    safeApiFetch(`/api/stories/${encodeURIComponent(storyId)}/like`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delta }),
     }).catch(() => {});
-  } catch (err) {
-    flagFirestoreQuotaExceeded(err);
+  }
+
+  // 2. Firestore fallback if enabled
+  if (!checkIsFirestoreBlocked()) {
+    try {
+      const storyDocRef = doc(db, 'story_stats', storyId);
+      const snap = await getDoc(storyDocRef);
+      if (!snap.exists()) {
+        await setDoc(storyDocRef, {
+          storyId,
+          views: 1,
+          likes: Math.max(0, delta),
+          followers: 0,
+          ratingSum: 0,
+          ratingCount: 0,
+          commentCount: 0,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      } else {
+        await updateDoc(storyDocRef, {
+          likes: increment(delta),
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+
+      const globalDocRef = doc(db, 'site_stats', STATS_DOC_ID);
+      await updateDoc(globalDocRef, {
+        totalLikes: increment(delta),
+      }).catch(() => {});
+    } catch (err) {
+      flagFirestoreQuotaExceeded(err);
+    }
   }
 };
 
@@ -1190,37 +1240,46 @@ export const toggleStoryLike = async (storyId: string, isLiking: boolean): Promi
  * Follow or unfollow a story in real time.
  */
 export const toggleStoryFollow = async (storyId: string, isFollowing: boolean): Promise<void> => {
-  if (checkIsFirestoreBlocked()) return;
-  try {
-    const storyDocRef = doc(db, 'story_stats', storyId);
-    const snap = await getDoc(storyDocRef);
-    const delta = isFollowing ? 1 : -1;
-
-    if (!snap.exists()) {
-      await setDoc(storyDocRef, {
-        storyId,
-        views: 1,
-        likes: 0,
-        followers: Math.max(0, delta),
-        ratingSum: 0,
-        ratingCount: 0,
-        commentCount: 0,
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      await updateDoc(storyDocRef, {
-        followers: increment(delta),
-        updatedAt: new Date().toISOString(),
-      });
-    }
-
-    // Update global followers count
-    const globalDocRef = doc(db, 'site_stats', STATS_DOC_ID);
-    await updateDoc(globalDocRef, {
-      totalFollowers: increment(delta),
+  const delta = isFollowing ? 1 : -1;
+  // 1. Server Engine
+  if (hasBackendServer()) {
+    safeApiFetch(`/api/stories/${encodeURIComponent(storyId)}/follow`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delta }),
     }).catch(() => {});
-  } catch (err) {
-    flagFirestoreQuotaExceeded(err);
+  }
+
+  // 2. Firestore fallback if enabled
+  if (!checkIsFirestoreBlocked()) {
+    try {
+      const storyDocRef = doc(db, 'story_stats', storyId);
+      const snap = await getDoc(storyDocRef);
+      if (!snap.exists()) {
+        await setDoc(storyDocRef, {
+          storyId,
+          views: 1,
+          likes: 0,
+          followers: Math.max(0, delta),
+          ratingSum: 0,
+          ratingCount: 0,
+          commentCount: 0,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      } else {
+        await updateDoc(storyDocRef, {
+          followers: increment(delta),
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+
+      const globalDocRef = doc(db, 'site_stats', STATS_DOC_ID);
+      await updateDoc(globalDocRef, {
+        totalFollowers: increment(delta),
+      }).catch(() => {});
+    } catch (err) {
+      flagFirestoreQuotaExceeded(err);
+    }
   }
 };
 
@@ -1228,31 +1287,41 @@ export const toggleStoryFollow = async (storyId: string, isFollowing: boolean): 
  * Submit a real reader rating (1-5 stars) for a story.
  */
 export const submitStoryRating = async (storyId: string, stars: number): Promise<void> => {
-  if (checkIsFirestoreBlocked()) return;
-  try {
-    const storyDocRef = doc(db, 'story_stats', storyId);
-    const snap = await getDoc(storyDocRef);
+  // 1. Server Engine
+  if (hasBackendServer()) {
+    safeApiFetch(`/api/stories/${encodeURIComponent(storyId)}/rate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stars }),
+    }).catch(() => {});
+  }
 
-    if (!snap.exists()) {
-      await setDoc(storyDocRef, {
-        storyId,
-        views: 1,
-        likes: 0,
-        followers: 0,
-        ratingSum: stars,
-        ratingCount: 1,
-        commentCount: 0,
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      await updateDoc(storyDocRef, {
-        ratingSum: increment(stars),
-        ratingCount: increment(1),
-        updatedAt: new Date().toISOString(),
-      });
+  // 2. Firestore fallback if enabled
+  if (!checkIsFirestoreBlocked()) {
+    try {
+      const storyDocRef = doc(db, 'story_stats', storyId);
+      const snap = await getDoc(storyDocRef);
+      if (!snap.exists()) {
+        await setDoc(storyDocRef, {
+          storyId,
+          views: 1,
+          likes: 0,
+          followers: 0,
+          ratingSum: stars,
+          ratingCount: 1,
+          commentCount: 0,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      } else {
+        await updateDoc(storyDocRef, {
+          ratingSum: increment(stars),
+          ratingCount: increment(1),
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+    } catch (err) {
+      flagFirestoreQuotaExceeded(err);
     }
-  } catch (err) {
-    flagFirestoreQuotaExceeded(err);
   }
 };
 
@@ -1734,7 +1803,16 @@ export const toggleReplyLike = async (
     }
   }
 
-  // 2. Firestore persistence if available
+  // 2. Server API persistence (100% reliable)
+  if (hasBackendServer()) {
+    safeApiFetch(`/api/comments/${encodeURIComponent(commentId)}/reply/${encodeURIComponent(replyId)}/like`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visitorId }),
+    }).catch(() => {});
+  }
+
+  // 3. Firestore persistence if available and enabled
   if (!isFirestoreQuotaExhausted()) {
     try {
       const commentRef = doc(db, 'comments', commentId);

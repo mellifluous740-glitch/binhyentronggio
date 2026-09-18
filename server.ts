@@ -29,6 +29,14 @@ import {
   replyComment,
   deleteComment,
   toggleCommentLike,
+  toggleReplyLike,
+  getGlobalStats,
+  recordSiteVisit,
+  getStoryStats,
+  recordStoryView,
+  toggleStoryLike,
+  toggleStoryFollow,
+  submitStoryRating,
   getAllGenres,
   saveGenres,
   addGenre,
@@ -490,6 +498,105 @@ app.post('/api/comments/:id/like', (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('Error liking comment:', err);
     res.status(500).json({ error: err.message || 'Failed to like comment' });
+  }
+});
+
+app.post('/api/comments/:id/reply/:replyId/like', (req: Request, res: Response) => {
+  try {
+    const { id, replyId } = req.params;
+    const { visitorId } = req.body;
+    const result = toggleReplyLike(id, replyId, visitorId || 'anonymous');
+    if (!result) {
+      res.status(404).json({ error: 'Comment or reply not found' });
+      return;
+    }
+    broadcastEvent('comment_reply_liked', { commentId: id, replyId, likes: result.likes, isLiked: result.isLiked });
+    res.json({ success: true, likes: result.likes, isLiked: result.isLiked });
+  } catch (err: any) {
+    console.error('Error liking reply:', err);
+    res.status(500).json({ error: err.message || 'Failed to like reply' });
+  }
+});
+
+// --- Realtime Stats API (100% Server Engine) ---
+app.get('/api/stats', (req: Request, res: Response) => {
+  try {
+    const stats = getGlobalStats();
+    res.json(stats);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to get stats' });
+  }
+});
+
+app.post('/api/stats/visit', (req: Request, res: Response) => {
+  try {
+    const totalVisits = recordSiteVisit();
+    const stats = getGlobalStats();
+    broadcastEvent('stats_updated', stats);
+    res.json({ success: true, totalVisits });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to record visit' });
+  }
+});
+
+app.get('/api/stories/:id/stats', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const stats = getStoryStats(id);
+    res.json(stats);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to get story stats' });
+  }
+});
+
+app.post('/api/stories/:id/view', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const stats = recordStoryView(id);
+    broadcastEvent('story_stats_updated', { storyId: id, stats });
+    res.json({ success: true, stats });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to record view' });
+  }
+});
+
+app.post('/api/stories/:id/like', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { delta } = req.body;
+    const stats = toggleStoryLike(id, typeof delta === 'number' ? delta : 1);
+    const globalStats = getGlobalStats();
+    broadcastEvent('story_stats_updated', { storyId: id, stats });
+    broadcastEvent('stats_updated', globalStats);
+    res.json({ success: true, stats, globalStats });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to like story' });
+  }
+});
+
+app.post('/api/stories/:id/follow', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { delta } = req.body;
+    const stats = toggleStoryFollow(id, typeof delta === 'number' ? delta : 1);
+    const globalStats = getGlobalStats();
+    broadcastEvent('story_stats_updated', { storyId: id, stats });
+    broadcastEvent('stats_updated', globalStats);
+    res.json({ success: true, stats, globalStats });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to follow story' });
+  }
+});
+
+app.post('/api/stories/:id/rate', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { stars } = req.body;
+    const stats = submitStoryRating(id, Number(stars) || 5);
+    broadcastEvent('story_stats_updated', { storyId: id, stats });
+    res.json({ success: true, stats });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to rate story' });
   }
 });
 

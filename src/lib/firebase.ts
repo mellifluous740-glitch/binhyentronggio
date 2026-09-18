@@ -78,14 +78,13 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 // Ensures Firestore network is always active and user content writes always execute.
 // ============================================================================
 
-// Auto-detect project ID change: if project changed (e.g. to new user account), reset enabled flag to true and clear localQuotaExhausted!
+// Auto-detect project ID change
 if (typeof window !== 'undefined') {
   try {
     const lastPid = localStorage.getItem('mel_firestore_project_id');
     const currentPid = resolvedFirebaseConfig.projectId;
     if (currentPid && lastPid !== currentPid) {
       localStorage.setItem('mel_firestore_project_id', currentPid);
-      localStorage.setItem('mel_firestore_enabled', 'true');
     }
   } catch {}
 }
@@ -94,10 +93,10 @@ export const isFirestoreEnabled = (): boolean => {
   if (typeof window === 'undefined') return false;
   try {
     const saved = localStorage.getItem('mel_firestore_enabled');
-    // Default to true now that fresh project is linked to user account
-    return saved !== 'false';
+    // Default to false: 100% Server Engine (Node.js Express + SSE + JSON store), zero quota limits, ultra fast!
+    return saved === 'true';
   } catch {
-    return true;
+    return false;
   }
 };
 

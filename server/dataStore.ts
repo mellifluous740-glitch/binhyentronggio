@@ -27,6 +27,7 @@ const PLAYLIST_FILE = path.join(DATA_DIR, 'playlist.json');
 const LETTERS_FILE = path.join(DATA_DIR, 'letters.json');
 const COMMENTS_FILE = path.join(DATA_DIR, 'comments.json');
 const GENRES_FILE = path.join(DATA_DIR, 'genres.json');
+const STATS_FILE = path.join(DATA_DIR, 'stats.json');
 
 // Default initial datasets
 const DEFAULT_TRACKS: AudioTrack[] = [
@@ -144,6 +145,18 @@ let cachedTracks: AudioTrack[] = [];
 let cachedLetters: ReaderLetter[] = [];
 let cachedComments: RealtimeComment[] = [];
 let cachedGenres: string[] = [];
+
+// Helper to read JSON safely
+const readJsonSafe = <T>(filePath: string, fallback: T): T => {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(content) as T;
+  } catch (err) {
+    console.error(`Failed to read file ${filePath}:`, err);
+    return fallback;
+  }
+};
 
 // Helper to write JSON safely and mirror to public/data
 const writeJsonSafe = (filePath: string, data: any) => {
@@ -687,9 +700,20 @@ export const replyComment = (commentId: string, reply: CommentReply): RealtimeCo
   const index = cachedComments.findIndex((c) => c.id === commentId);
   if (index >= 0) {
     const existingReplies = Array.isArray(cachedComments[index].replies) ? cachedComments[index].replies! : [];
+    const formattedReply: CommentReply = {
+      id: reply.id || `rep_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      user: reply.user || 'Bạn đọc yêu truyện',
+      avatar: reply.avatar || '🌸',
+      text: reply.text,
+      isAuthor: !!reply.isAuthor,
+      isCollaborator: !!reply.isCollaborator,
+      likes: typeof reply.likes === 'number' ? reply.likes : 0,
+      likedBy: Array.isArray(reply.likedBy) ? reply.likedBy : [],
+      createdAt: reply.createdAt || new Date().toISOString(),
+    };
     cachedComments[index] = {
       ...cachedComments[index],
-      replies: [...existingReplies, reply],
+      replies: [...existingReplies, formattedReply],
     };
     writeJsonSafe(COMMENTS_FILE, cachedComments);
     return cachedComments[index];
@@ -720,6 +744,186 @@ export const toggleCommentLike = (commentId: string, visitorId: string): { likes
     return { likes: newLikes, isLiked: !hasLiked };
   }
   return undefined;
+};
+
+export const toggleReplyLike = (
+  commentId: string,
+  replyId: string,
+  visitorId: string
+): { likes: number; isLiked: boolean } | undefined => {
+  const index = cachedComments.findIndex((c) => c.id === commentId);
+  if (index >= 0) {
+    const comment = cachedComments[index];
+    const rawReplies = Array.isArray(comment.replies) ? comment.replies : [];
+    let finalLikes = 0;
+    let isLiked = false;
+    const updatedReplies = rawReplies.map((r) => {
+      if (r.id === replyId) {
+        const likedBy = Array.isArray(r.likedBy) ? r.likedBy : [];
+        const hasLiked = likedBy.includes(visitorId);
+        const newLikedBy = hasLiked ? likedBy.filter((id) => id !== visitorId) : [...likedBy, visitorId];
+        finalLikes = Math.max(0, newLikedBy.length);
+        isLiked = !hasLiked;
+        return { ...r, likes: finalLikes, likedBy: newLikedBy };
+      }
+      return r;
+    });
+    cachedComments[index] = {
+      ...comment,
+      replies: updatedReplies,
+    };
+    writeJsonSafe(COMMENTS_FILE, cachedComments);
+    return { likes: finalLikes, isLiked };
+  }
+  return undefined;
+};
+
+// ==========================================
+// Stats Operations (Global & Per Story)
+// ==========================================
+interface StoryStatsRecord {
+  views: number;
+  likes: number;
+  followers: number;
+  ratingSum: number;
+  ratingCount: number;
+}
+
+interface PersistedStats {
+  global: {
+    totalVisits: number;
+    totalFollowers: number;
+    totalLikes: number;
+  };
+  stories: Record<string, StoryStatsRecord>;
+}
+
+let cachedStats: PersistedStats = {
+  global: {
+    totalVisits: 1,
+    totalFollowers: 0,
+    totalLikes: 0,
+  },
+  stories: {},
+};
+
+const loadStats = () => {
+  const loaded = readJsonSafe<PersistedStats | null>(STATS_FILE, null);
+  if (loaded && loaded.global) {
+    cachedStats = {
+      global: {
+        totalVisits: Number(loaded.global.totalVisits) || 1,
+        totalFollowers: Number(loaded.global.totalFollowers) || 0,
+        totalLikes: Number(loaded.global.totalLikes) || 0,
+      },
+      stories: loaded.stories || {},
+    };
+  } else {
+    cachedStats = {
+      global: { totalVisits: 1, totalFollowers: 0, totalLikes: 0 },
+      stories: {},
+    };
+    writeJsonSafe(STATS_FILE, cachedStats);
+  }
+};
+
+loadStats();
+
+export const getGlobalStats = () => {
+  reloadCommentsIfChanged();
+  return {
+    totalVisits: cachedStats.global.totalVisits,
+    totalFollowers: cachedStats.global.totalFollowers,
+    totalLikes: cachedStats.global.totalLikes,
+    totalComments: cachedComments.length,
+    activeReaders: 1,
+  };
+};
+
+export const recordSiteVisit = (): number => {
+  cachedStats.global.totalVisits = (cachedStats.global.totalVisits || 0) + 1;
+  writeJsonSafe(STATS_FILE, cachedStats);
+  return cachedStats.global.totalVisits;
+};
+
+export const getStoryStats = (storyId: string) => {
+  reloadCommentsIfChanged();
+  const story = cachedStories.find((s) => s.id === storyId);
+  const existing = cachedStats.stories[storyId] || {
+    views: story?.views || 0,
+    likes: story?.likes || 0,
+    followers: 0,
+    ratingSum: 0,
+    ratingCount: 0,
+  };
+  const commentCount = cachedComments.filter((c) => c.storyId === storyId).length;
+  return {
+    ...existing,
+    commentCount,
+  };
+};
+
+export const recordStoryView = (storyId: string) => {
+  if (!cachedStats.stories[storyId]) {
+    const story = cachedStories.find((s) => s.id === storyId);
+    cachedStats.stories[storyId] = {
+      views: story?.views || 0,
+      likes: story?.likes || 0,
+      followers: 0,
+      ratingSum: 0,
+      ratingCount: 0,
+    };
+  }
+  cachedStats.stories[storyId].views += 1;
+  const sIdx = cachedStories.findIndex((s) => s.id === storyId);
+  if (sIdx >= 0) {
+    cachedStories[sIdx].views = cachedStats.stories[storyId].views;
+    writeJsonSafe(STORIES_FILE, cachedStories);
+  }
+  writeJsonSafe(STATS_FILE, cachedStats);
+  return getStoryStats(storyId);
+};
+
+export const toggleStoryLike = (storyId: string, delta: number) => {
+  if (!cachedStats.stories[storyId]) {
+    const story = cachedStories.find((s) => s.id === storyId);
+    cachedStats.stories[storyId] = {
+      views: story?.views || 0,
+      likes: story?.likes || 0,
+      followers: 0,
+      ratingSum: 0,
+      ratingCount: 0,
+    };
+  }
+  cachedStats.stories[storyId].likes = Math.max(0, (cachedStats.stories[storyId].likes || 0) + delta);
+  cachedStats.global.totalLikes = Math.max(0, (cachedStats.global.totalLikes || 0) + delta);
+  const sIdx = cachedStories.findIndex((s) => s.id === storyId);
+  if (sIdx >= 0) {
+    cachedStories[sIdx].likes = cachedStats.stories[storyId].likes;
+    writeJsonSafe(STORIES_FILE, cachedStories);
+  }
+  writeJsonSafe(STATS_FILE, cachedStats);
+  return getStoryStats(storyId);
+};
+
+export const toggleStoryFollow = (storyId: string, delta: number) => {
+  if (!cachedStats.stories[storyId]) {
+    cachedStats.stories[storyId] = { views: 0, likes: 0, followers: 0, ratingSum: 0, ratingCount: 0 };
+  }
+  cachedStats.stories[storyId].followers = Math.max(0, (cachedStats.stories[storyId].followers || 0) + delta);
+  cachedStats.global.totalFollowers = Math.max(0, (cachedStats.global.totalFollowers || 0) + delta);
+  writeJsonSafe(STATS_FILE, cachedStats);
+  return getStoryStats(storyId);
+};
+
+export const submitStoryRating = (storyId: string, stars: number) => {
+  if (!cachedStats.stories[storyId]) {
+    cachedStats.stories[storyId] = { views: 0, likes: 0, followers: 0, ratingSum: 0, ratingCount: 0 };
+  }
+  cachedStats.stories[storyId].ratingSum = (cachedStats.stories[storyId].ratingSum || 0) + stars;
+  cachedStats.stories[storyId].ratingCount = (cachedStats.stories[storyId].ratingCount || 0) + 1;
+  writeJsonSafe(STATS_FILE, cachedStats);
+  return getStoryStats(storyId);
 };
 
 // Genres Operations

@@ -354,39 +354,33 @@ export const AuthorSyncTab: React.FC<AuthorSyncTabProps> = ({ onFeedback, onRefr
           </div>
         </div>
 
-        {/* Card 2: Server API */}
-        <div className="p-4 rounded-2xl bg-white dark:bg-stone-850 border border-stone-200 dark:border-stone-700 space-y-3 flex flex-col justify-between shadow-2xs">
+        {/* Card 2: Server API (Primary Engine) */}
+        <div className="p-4 rounded-2xl bg-white dark:bg-stone-850 border-2 border-emerald-500/40 dark:border-emerald-500/30 space-y-3 flex flex-col justify-between shadow-xs relative">
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Server className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                <Server className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 <span className="font-serif text-sm font-bold text-stone-800 dark:text-stone-100">
-                  Server Backend
+                  Server Engine (Chính)
                 </span>
               </div>
               <span
                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
                   serverStatus === 'connected'
                     ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
-                    : 'bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300'
+                    : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
                 }`}
               >
-                {serverStatus === 'connected'
-                  ? 'Đang kết nối'
-                  : isStaticHosting() && !customBackendUrl
-                  ? 'GitHub Pages Tĩnh (Không 404)'
-                  : 'Ngoại tuyến / Tĩnh'}
+                {serverStatus === 'connected' ? 'Đang hoạt động (Ưu tiên)' : 'Đang kết nối lại'}
               </span>
             </div>
-            <p className="text-xs text-stone-500 dark:text-stone-400">
-              {serverStatus === 'connected'
-                ? 'Node.js Express backend đang kết nối trực tiếp, phản hồi REST và SSE tức thì.'
-                : 'Đang chạy ở chế độ tĩnh. Ứng dụng tự động chuyển sang đọc GitHub Raw CDN và Firestore, triệt tiêu 100% lỗi 404 trên console.'}
+            <p className="text-xs text-stone-600 dark:text-stone-300 leading-relaxed">
+              Xử lý 100% bình luận, lượt thích, phản hồi, số liệu thống kê (lượt xem, theo dõi, đánh giá) và đồng bộ thời gian thực SSE. Hoàn toàn không lo hết hạn ngạch.
             </p>
           </div>
           <div className="pt-2 border-t border-stone-100 dark:border-stone-800 flex items-center justify-between text-[11px] text-stone-600 dark:text-stone-400">
-            <span>Tệp: <code className="text-sky-600 dark:text-sky-400">data/*.json</code></span>
-            <span>{serverStatus === 'connected' ? (getApiBaseUrl() ? 'Cloud Run / Ext' : 'Port 3000') : 'GitHub CDN Mode'}</span>
+            <span>Dữ liệu: <code className="text-emerald-600 dark:text-emerald-400 font-mono">data/*.json</code></span>
+            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Tốc độ cao & Bền vững</span>
           </div>
         </div>
 
